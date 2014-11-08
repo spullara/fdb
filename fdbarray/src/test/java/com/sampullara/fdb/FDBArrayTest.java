@@ -32,7 +32,7 @@ public class FDBArrayTest {
 
     List<String> directory = Arrays.asList("testArray");
     dl.removeIfExists(db, directory).get();
-    ds = dl.create(db, directory).get();
+    DirectorySubspace ds = dl.create(db, directory).get();
     FDBArray.create(db, ds, 512, null, System.currentTimeMillis());
     fdbArray = new FDBArray(db, ds);
   }
@@ -107,12 +107,10 @@ public class FDBArrayTest {
     fdbArray.read(parentRead, 1000).get();
     assertArrayEquals(parentBytes, parentRead);
 
-    // Should start with a snapshot of the parent
+    // Should start with a snapshot of the parent, need to delete first for testing
     List<String> childDirectory = Arrays.asList("testChildArray");
     dl.removeIfExists(db, childDirectory).get();
-    DirectorySubspace childDs = dl.create(db, childDirectory).get();
-    FDBArray.create(db, childDs, 512, ds, System.currentTimeMillis());
-    FDBArray fdbChildArray = new FDBArray(db, childDs);
+    FDBArray fdbChildArray = fdbArray.snapshot("testChildArray");
 
     byte[] childRead = new byte[1000];
     fdbChildArray.read(childRead, 1000).get();

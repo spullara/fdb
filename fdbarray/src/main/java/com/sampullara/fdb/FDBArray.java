@@ -211,36 +211,55 @@ public class FDBArray {
     int blockOffset = (int) (offset % blockSize);
     int length = read.length;
     long lastBlock = (offset + length) / blockSize;
+    long currentBlockId = -1;
+    byte[] currentValue = null;
     for (KeyValue keyValue : tx.getRange(data.get(firstBlock).pack(), data.get(lastBlock + 1).pack())) {
       Tuple keyTuple = data.unpack(keyValue.getKey());
       long blockId = keyTuple.getLong(0);
+      if (blockId != currentBlockId && currentBlockId != -1) {
+        // Only copy blocks that we are going to use
+        currentValue = copy(read, firstBlock, blockOffset, lastBlock, currentValue, currentBlockId);
+      }
+      // Advance the current block id
+      currentBlockId = blockId;
+      // Update the current value with the latest value not written after the snapshot timestamp
       long timestamp = keyTuple.getLong(1);
       if (timestamp <= snapshotTimestamp) {
-        // This is a super naive way to do this. Basically we always copy
-        // the block into the output unless it is too new. We will then
-        // end up with the latest value in the output. However, we should
-        // only copy the latest value rather than do this extra work.
-        byte[] value = keyValue.getValue();
-        int blockPosition = (int) ((blockId - firstBlock) * blockSize);
-        int shift = blockSize - blockOffset;
-        if (blockId == firstBlock) {
-          int firstBlockLength = Math.min(shift, read.length);
-          System.arraycopy(value, blockOffset, read, 0, firstBlockLength);
+        currentValue = keyValue.getValue();
+      }
+    }
+    copy(read, firstBlock, blockOffset, lastBlock, currentValue, currentBlockId);
+  }
+
+  private byte[] copy(byte[] read, long firstBlock, int blockOffset, long lastBlock, byte[] currentValue, long blockId) {
+    if (currentValue != null) {
+      int blockPosition = (int) ((blockId - firstBlock) * blockSize);
+      int shift = blockSize - blockOffset;
+      if (blockId == firstBlock) {
+        int firstBlockLength = Math.min(shift, read.length);
+        System.arraycopy(currentValue, blockOffset, read, 0, firstBlockLength);
+      } else {
+        int position = blockPosition - blockSize + shift;
+        if (blockId == lastBlock) {
+          int lastLength = read.length - position;
+          System.arraycopy(currentValue, 0, read, position, lastLength);
         } else {
-          int position = blockPosition - blockSize + shift;
-          if (blockId == lastBlock) {
-            int lastLength = read.length - position;
-            System.arraycopy(value, 0, read, position, lastLength);
-          } else {
-            System.arraycopy(value, 0, read, position, blockSize);
-          }
+          System.arraycopy(currentValue, 0, read, position, blockSize);
         }
       }
     }
+    return null;
   }
 
   public FDBArray snapshot() {
     return new FDBArray(database, ds, System.currentTimeMillis());
+  }
+
+  public FDBArray snapshot(String name) {
+    List<String> childDirectory = Arrays.asList(name);
+    DirectorySubspace childDs = DirectoryLayer.getDefault().create(database, childDirectory).get();
+    FDBArray.create(database, childDs, 512, ds, System.currentTimeMillis());
+    return new FDBArray(database, childDs);
   }
 
   public void clear() {
