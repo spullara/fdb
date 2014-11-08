@@ -22,7 +22,7 @@ import java.util.List;
  */
 public class FDBArray {
 
-  private static final byte[] EMPTY_LONG_BYTES = new byte[8];
+  // FDB
   private static final byte[] ONE = new byte[]{0, 0, 0, 0, 0, 0, 0, 1};
   private static final byte[] MINUS_ONE = new byte[]{0, 0, 0, 0, 0, 0, 0, -1};
   private static DirectoryLayer dl = DirectoryLayer.getDefault();
@@ -42,6 +42,10 @@ public class FDBArray {
   private final FDBArray parentArray;
   private final DirectorySubspace ds;
   private final Long snapshot;
+  private final FDBBitSet usedBlocks;
+
+  // Keys
+  private byte[] dependents;
 
   // Used for copies
   private final ThreadLocal<byte[]> buffer = new ThreadLocal<byte[]>() {
@@ -50,7 +54,6 @@ public class FDBArray {
       return new byte[blockSize];
     }
   };
-  private byte[] dependents;
 
   public static FDBArray open(Database database, String name) {
     DirectorySubspace ds = dl.open(database, Arrays.asList("com.sampullara.fdb.array", name)).get();
@@ -128,6 +131,7 @@ public class FDBArray {
       }
     });
     dependents = metadata.get(DEPENDENTS).pack();
+    usedBlocks = new FDBBitSet(database, metadata.get(BLOCKS), 512);
   }
 
   protected FDBArray(Database database, DirectorySubspace ds) {
@@ -150,6 +154,9 @@ public class FDBArray {
         long lastBlock = (offset + length) / blockSize;
         int blockOffset = (int) (offset % blockSize);
         int shift = blockSize - blockOffset;
+
+        // Track where we have written so we can estimate usage later
+        usedBlocks.set(firstBlock, lastBlock);
 
         // Special case first block and last block
         byte[] firstBlockKey = data.get(firstBlock).get(System.currentTimeMillis()).pack();
@@ -190,6 +197,15 @@ public class FDBArray {
           }
         }
         return ReadyFuture.DONE;
+      }
+    });
+  }
+
+  public Future<Long> usage() {
+    return usedBlocks.count().map(new Function<Long, Long>() {
+      @Override
+      public Long apply(Long usedBlocks) {
+        return usedBlocks * blockSize;
       }
     });
   }
@@ -237,7 +253,8 @@ public class FDBArray {
       long blockId = keyTuple.getLong(0);
       if (blockId != currentBlockId && currentBlockId != -1) {
         // Only copy blocks that we are going to use
-        currentValue = copy(read, firstBlock, blockOffset, lastBlock, currentValue, currentBlockId);
+        copy(read, firstBlock, blockOffset, lastBlock, currentValue, currentBlockId);
+        currentValue = null;
       }
       // Advance the current block id
       currentBlockId = blockId;
@@ -250,7 +267,7 @@ public class FDBArray {
     copy(read, firstBlock, blockOffset, lastBlock, currentValue, currentBlockId);
   }
 
-  private byte[] copy(byte[] read, long firstBlock, int blockOffset, long lastBlock, byte[] currentValue, long blockId) {
+  private void copy(byte[] read, long firstBlock, int blockOffset, long lastBlock, byte[] currentValue, long blockId) {
     if (currentValue != null) {
       int blockPosition = (int) ((blockId - firstBlock) * blockSize);
       int shift = blockSize - blockOffset;
@@ -267,7 +284,6 @@ public class FDBArray {
         }
       }
     }
-    return null;
   }
 
   public FDBArray snapshot() {

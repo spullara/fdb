@@ -46,6 +46,7 @@ public class FDBArrayTest {
     byte[] read = new byte[12345];
     fdbArray.read(read, 10000).get();
     assertArrayEquals(bytes, read);
+    assertEquals((12345 / 512 + 1) * 512, fdbArray.usage().get().longValue());
   }
 
   @Test
@@ -140,5 +141,6 @@ public class FDBArrayTest {
       fdbArray.read(read, offset).get();
       assertArrayEquals("Iteration: " + i + ", " + length + ", " + offset, bytes, read);
     }
+    assertEquals((110000 / 512 + 1) * 512, fdbArray.usage().get().longValue());
   }
 }
