@@ -129,30 +129,17 @@ public class FDBArray {
         int shift = blockSize - blockOffset;
         // Special case first block and last block
         byte[] firstBlockKey = data.get(firstBlock).get(System.currentTimeMillis()).pack();
-        Future<Void> result;
         if (blockOffset > 0 || (blockOffset == 0 && length < blockSize)) {
           // Only need to do this if the first block is partial
           byte[] readBytes = new byte[blockSize];
-          read(readBytes, firstBlock * blockSize);
-          result = read(readBytes, firstBlock * blockSize).flatMap(new Function<Void, Future<Void>>() {
-            @Override
-            public Future<Void> apply(Void done) {
-              int writeLength = Math.min(length, shift);
-              System.arraycopy(write, 0, readBytes, blockOffset, writeLength);
-              tx.set(firstBlockKey, readBytes);
-              return ReadyFuture.DONE;
-            }
-          });
+          FDBArray.this.read(tx, firstBlock * blockSize, readBytes, Long.MAX_VALUE);
+          int writeLength = Math.min(length, shift);
+          System.arraycopy(write, 0, readBytes, blockOffset, writeLength);
+          tx.set(firstBlockKey, readBytes);
         } else {
           // In this case copy the full first block blindly
-          result = database.runAsync(new Function<Transaction, Future<Void>>() {
-            @Override
-            public Future<Void> apply(Transaction tx) {
-              System.arraycopy(write, 0, bytes, 0, blockSize);
-              tx.set(firstBlockKey, bytes);
-              return ReadyFuture.DONE;
-            }
-          });
+          System.arraycopy(write, 0, bytes, 0, blockSize);
+          tx.set(firstBlockKey, bytes);
         }
         if (lastBlock > firstBlock) {
           // For the blocks in the middle we can just blast values in without looking at the current bytes
@@ -165,17 +152,12 @@ public class FDBArray {
           }
           byte[] lastBlockKey = data.get(lastBlock).get(System.currentTimeMillis()).pack();
           byte[] readBytes = new byte[blockSize];
-          result = result.flatMap($ -> read(readBytes, lastBlock * blockSize).flatMap(new Function<Void, Future<Void>>() {
-            @Override
-            public Future<Void> apply(Void done) {
-              int position = (int) ((lastBlock - firstBlock - 1) * blockSize + shift);
-              System.arraycopy(write, position, readBytes, 0, length - position);
-              tx.set(lastBlockKey, readBytes);
-              return ReadyFuture.DONE;
-            }
-          }));
+          FDBArray.this.read(tx, lastBlock * blockSize, readBytes, Long.MAX_VALUE);
+          int position = (int) ((lastBlock - firstBlock - 1) * blockSize + shift);
+          System.arraycopy(write, position, readBytes, 0, length - position);
+          tx.set(lastBlockKey, readBytes);
         }
-        return result;
+        return ReadyFuture.DONE;
       }
     });
   }
@@ -200,44 +182,48 @@ public class FDBArray {
    * @return
    */
   public Future<Void> read(byte[] read, long offset, long timestamp) {
-    long snapshotTimestamp = snapshot == null ? timestamp : Math.min(timestamp, snapshot);
-    Future<Void> parentRead = parentArray == null ? ReadyFuture.DONE : parentArray.read(read, offset, snapshotTimestamp);
-    return parentRead.flatMap(done -> database.runAsync(new Function<Transaction, Future<Void>>() {
+    return database.runAsync(new Function<Transaction, Future<Void>>() {
       @Override
       public Future<Void> apply(Transaction tx) {
-        long firstBlock = offset / blockSize;
-        int blockOffset = (int) (offset % blockSize);
-        int length = read.length;
-        long lastBlock = (offset + length) / blockSize;
-        for (KeyValue keyValue : tx.getRange(data.get(firstBlock).pack(), data.get(lastBlock + 1).pack())) {
-          Tuple keyTuple = data.unpack(keyValue.getKey());
-          long blockId = keyTuple.getLong(0);
-          long timestamp = keyTuple.getLong(1);
-          if (timestamp <= snapshotTimestamp) {
-            // This is a super naive way to do this. Basically we always copy
-            // the block into the output unless it is too new. We will then
-            // end up with the latest value in the output. However, we should
-            // only copy the latest value rather than do this extra work.
-            byte[] value = keyValue.getValue();
-            int blockPosition = (int) ((blockId - firstBlock) * blockSize);
-            int shift = blockSize - blockOffset;
-            if (blockId == firstBlock) {
-              int firstBlockLength = Math.min(shift, read.length);
-              System.arraycopy(value, blockOffset, read, 0, firstBlockLength);
-            } else {
-              int position = blockPosition - blockSize + shift;
-              if (blockId == lastBlock) {
-                int lastLength = read.length - position;
-                System.arraycopy(value, 0, read, position, lastLength);
-              } else {
-                System.arraycopy(value, 0, read, position, blockSize);
-              }
-            }
-          }
-        }
+        FDBArray.this.read(tx, offset, read, timestamp);
         return ReadyFuture.DONE;
       }
-    }));
+    });
+  }
+
+  private void read(Transaction tx, long offset, byte[] read, long readTimestamp) {
+    long snapshotTimestamp = snapshot == null ? readTimestamp : Math.min(readTimestamp, snapshot);
+    if (parentArray != null) parentArray.read(tx, offset, read, snapshotTimestamp);
+    long firstBlock = offset / blockSize;
+    int blockOffset = (int) (offset % blockSize);
+    int length = read.length;
+    long lastBlock = (offset + length) / blockSize;
+    for (KeyValue keyValue : tx.getRange(data.get(firstBlock).pack(), data.get(lastBlock + 1).pack())) {
+      Tuple keyTuple = data.unpack(keyValue.getKey());
+      long blockId = keyTuple.getLong(0);
+      long timestamp = keyTuple.getLong(1);
+      if (timestamp <= snapshotTimestamp) {
+        // This is a super naive way to do this. Basically we always copy
+        // the block into the output unless it is too new. We will then
+        // end up with the latest value in the output. However, we should
+        // only copy the latest value rather than do this extra work.
+        byte[] value = keyValue.getValue();
+        int blockPosition = (int) ((blockId - firstBlock) * blockSize);
+        int shift = blockSize - blockOffset;
+        if (blockId == firstBlock) {
+          int firstBlockLength = Math.min(shift, read.length);
+          System.arraycopy(value, blockOffset, read, 0, firstBlockLength);
+        } else {
+          int position = blockPosition - blockSize + shift;
+          if (blockId == lastBlock) {
+            int lastLength = read.length - position;
+            System.arraycopy(value, 0, read, position, lastLength);
+          } else {
+            System.arraycopy(value, 0, read, position, blockSize);
+          }
+        }
+      }
+    }
   }
 
   public FDBArray snapshot() {
