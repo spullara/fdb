@@ -2,15 +2,13 @@ package com.sampullara.fdb;
 
 import com.foundationdb.Database;
 import com.foundationdb.FDB;
-import com.foundationdb.directory.DirectoryLayer;
-import com.foundationdb.directory.DirectorySubspace;
 import org.junit.After;
+import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
 import java.util.Arrays;
-import java.util.List;
 import java.util.Random;
 
 import static org.junit.Assert.assertArrayEquals;
@@ -20,26 +18,23 @@ import static org.junit.Assert.fail;
 public class FDBArrayTest {
 
   private static FDBArray fdbArray;
-  private static Database db;
-  private static DirectoryLayer dl;
-  private static DirectorySubspace ds;
 
   @BeforeClass
   public static void setup() {
     FDB fdb = FDB.selectAPIVersion(200);
-    db = fdb.open();
-    dl = DirectoryLayer.getDefault();
+    Database db = fdb.open();
+    FDBArray.create(db, "testArray", 512);
+    fdbArray = FDBArray.open(db, "testArray");
+  }
 
-    List<String> directory = Arrays.asList("testArray");
-    dl.removeIfExists(db, directory).get();
-    DirectorySubspace ds = dl.create(db, directory).get();
-    FDBArray.create(db, ds, 512, null, System.currentTimeMillis());
-    fdbArray = new FDBArray(db, ds);
+  @AfterClass
+  public static void cleanup() {
+    fdbArray.delete();
   }
 
   @After
   @Before
-  public void before() {
+  public void delete() {
     fdbArray.clear();
   }
 
@@ -108,26 +103,27 @@ public class FDBArrayTest {
     assertArrayEquals(parentBytes, parentRead);
 
     // Should start with a snapshot of the parent, need to delete first for testing
-    List<String> childDirectory = Arrays.asList("testChildArray");
-    dl.removeIfExists(db, childDirectory).get();
     FDBArray fdbChildArray = fdbArray.snapshot("testChildArray");
+    try {
+      byte[] childRead = new byte[1000];
+      fdbChildArray.read(childRead, 1000).get();
+      assertArrayEquals(parentBytes, childRead);
 
-    byte[] childRead = new byte[1000];
-    fdbChildArray.read(childRead, 1000).get();
-    assertArrayEquals(parentBytes, childRead);
+      byte[] childBytes = new byte[1000];
+      r.nextBytes(childBytes);
+      fdbChildArray.write(childBytes, 1500).get();
 
-    byte[] childBytes = new byte[1000];
-    r.nextBytes(childBytes);
-    fdbChildArray.write(childBytes, 1500).get();
+      byte[] mixedRead = new byte[1500];
+      fdbChildArray.read(mixedRead, 1000).get();
 
-    byte[] mixedRead = new byte[1500];
-    fdbChildArray.read(mixedRead, 1000).get();
-
-    for (int i = 0; i < 500; i++) {
-      assertEquals("Failed: " + i, parentBytes[i], mixedRead[i]);
-    }
-    for (int i = 500; i < 1500; i++) {
-      assertEquals("Failed: " + i, childBytes[i - 500], mixedRead[i]);
+      for (int i = 0; i < 500; i++) {
+        assertEquals("Failed: " + i, parentBytes[i], mixedRead[i]);
+      }
+      for (int i = 500; i < 1500; i++) {
+        assertEquals("Failed: " + i, childBytes[i - 500], mixedRead[i]);
+      }
+    } finally {
+      fdbChildArray.delete();
     }
   }
 
@@ -142,8 +138,7 @@ public class FDBArrayTest {
       fdbArray.write(bytes, offset).get();
       byte[] read = new byte[length];
       fdbArray.read(read, offset).get();
-      assertArrayEquals("Iteration: " + i + ", " + length + ", " + offset,bytes, read);
+      assertArrayEquals("Iteration: " + i + ", " + length + ", " + offset, bytes, read);
     }
   }
-
 }

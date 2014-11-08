@@ -2,6 +2,7 @@ package com.sampullara.fdb;
 
 import com.foundationdb.Database;
 import com.foundationdb.KeyValue;
+import com.foundationdb.MutationType;
 import com.foundationdb.ReadTransaction;
 import com.foundationdb.Transaction;
 import com.foundationdb.async.Function;
@@ -11,6 +12,7 @@ import com.foundationdb.directory.DirectoryLayer;
 import com.foundationdb.directory.DirectorySubspace;
 import com.foundationdb.tuple.Tuple;
 import com.google.common.primitives.Ints;
+import com.google.common.primitives.Longs;
 
 import java.util.Arrays;
 import java.util.List;
@@ -20,10 +22,17 @@ import java.util.List;
  */
 public class FDBArray {
 
+  private static final byte[] EMPTY_LONG_BYTES = new byte[8];
+  private static final byte[] ONE = new byte[]{0, 0, 0, 0, 0, 0, 0, 1};
+  private static final byte[] MINUS_ONE = new byte[]{0, 0, 0, 0, 0, 0, 0, -1};
+  private static DirectoryLayer dl = DirectoryLayer.getDefault();
+
   // Metadata keys
   private static final String BLOCK_SIZE_KEY = "block_size";
   private static final String PARENT_KEY = "parent";
   private static final String PARENT_TIMESTAMP_KEY = "parent_timestamp";
+  private static final String DEPENDENTS = "dependents";
+  private static final String BLOCKS = "blocks";
 
   // Location in the database
   private final DirectorySubspace metadata;
@@ -41,8 +50,24 @@ public class FDBArray {
       return new byte[blockSize];
     }
   };
+  private byte[] dependents;
 
-  public static FDBArray create(Database database, DirectorySubspace ds, int blockSize, DirectorySubspace parent, long timestamp) {
+  public static FDBArray open(Database database, String name) {
+    DirectorySubspace ds = dl.open(database, Arrays.asList("com.sampullara.fdb.array", name)).get();
+    return new FDBArray(database, ds);
+  }
+
+  public static FDBArray open(Database database, String name, long timestamp) {
+    DirectorySubspace ds = dl.open(database, Arrays.asList("com.sampullara.fdb.array", name)).get();
+    return new FDBArray(database, ds, timestamp);
+  }
+
+  public static FDBArray create(Database database, String name, int blockSize) {
+    DirectorySubspace ds = dl.create(database, Arrays.asList("com.sampullara.fdb.array", name)).get();
+    return create(database, ds, blockSize, null, 0);
+  }
+
+  protected static FDBArray create(Database database, DirectorySubspace ds, int blockSize, DirectorySubspace parent, long timestamp) {
     DirectorySubspace metadata = ds.create(database, Arrays.asList("metadata")).get();
     if (parent != null) {
       List<String> parentPath = parent.getPath();
@@ -65,7 +90,7 @@ public class FDBArray {
     return new FDBArray(database, ds);
   }
 
-  public FDBArray(Database database, DirectorySubspace ds, Long snapshot) {
+  protected FDBArray(Database database, DirectorySubspace ds, Long snapshot) {
     this.ds = ds;
     this.snapshot = snapshot;
     this.database = database;
@@ -102,16 +127,10 @@ public class FDBArray {
         }
       }
     });
+    dependents = metadata.get(DEPENDENTS).pack();
   }
 
-  /**
-   * Arrays are 0 indexed byte arrays using blockSize bytes per value.
-   *
-   * @param blockSize
-   * @param type
-   * @param database
-   */
-  public FDBArray(Database database, DirectorySubspace ds) {
+  protected FDBArray(Database database, DirectorySubspace ds) {
     this(database, ds, null);
   }
 
@@ -252,10 +271,21 @@ public class FDBArray {
   }
 
   public FDBArray snapshot() {
-    return new FDBArray(database, ds, System.currentTimeMillis());
+    return snapshot(System.currentTimeMillis());
+  }
+
+  public FDBArray snapshot(long timestamp) {
+    return new FDBArray(database, ds, timestamp);
   }
 
   public FDBArray snapshot(String name) {
+    database.run(new Function<Transaction, Object>() {
+      @Override
+      public Object apply(Transaction tx) {
+        tx.mutate(MutationType.ADD, dependents, ONE);
+        return null;
+      }
+    });
     List<String> childDirectory = Arrays.asList(name);
     DirectorySubspace childDs = DirectoryLayer.getDefault().create(database, childDirectory).get();
     FDBArray.create(database, childDs, 512, ds, System.currentTimeMillis());
@@ -270,6 +300,32 @@ public class FDBArray {
         return null;
       }
     });
+  }
+
+  private void dependentDeleted() {
+    database.run(new Function<Transaction, Object>() {
+      @Override
+      public Object apply(Transaction tx) {
+        tx.mutate(MutationType.ADD, dependents, MINUS_ONE);
+        return null;
+      }
+    });
+  }
+
+  public void delete() {
+    boolean deletable = database.run(new Function<Transaction, Boolean>() {
+      @Override
+      public Boolean apply(Transaction tx) {
+        byte[] bytes = tx.get(dependents).get();
+        return bytes == null || Longs.fromByteArray(bytes) == 0;
+      }
+    });
+    if (deletable) {
+      if (parentArray != null) parentArray.dependentDeleted();
+      ds.remove(database).get();
+    } else {
+      throw new IllegalStateException("Array still has dependents");
+    }
   }
 
   public void setMetadata(byte[] key, byte[] value) {
