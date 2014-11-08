@@ -15,7 +15,9 @@ import com.google.common.primitives.Ints;
 import com.google.common.primitives.Longs;
 
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Block storage in FDB
@@ -163,7 +165,7 @@ public class FDBArray {
         if (blockOffset > 0 || (blockOffset == 0 && length < blockSize)) {
           // Only need to do this if the first block is partial
           byte[] readBytes = new byte[blockSize];
-          read(tx, firstBlock * blockSize, readBytes, Long.MAX_VALUE);
+          read(tx, firstBlock * blockSize, readBytes, Long.MAX_VALUE, null);
           int writeLength = Math.min(length, shift);
           System.arraycopy(write, 0, readBytes, blockOffset, writeLength);
           tx.set(firstBlockKey, readBytes);
@@ -191,7 +193,7 @@ public class FDBArray {
             tx.set(lastBlockKey, bytes);
           } else {
             byte[] readBytes = new byte[blockSize];
-            read(tx, lastBlock * blockSize, readBytes, Long.MAX_VALUE);
+            read(tx, lastBlock * blockSize, readBytes, Long.MAX_VALUE, null);
             System.arraycopy(write, position, readBytes, 0, lastBlockLength);
             tx.set(lastBlockKey, readBytes);
           }
@@ -233,32 +235,47 @@ public class FDBArray {
     return database.runAsync(new Function<Transaction, Future<Void>>() {
       @Override
       public Future<Void> apply(Transaction tx) {
-        read(tx, offset, read, timestamp);
+        read(tx, offset, read, timestamp, null);
         return ReadyFuture.DONE;
       }
     });
   }
 
-  private void read(ReadTransaction tx, long offset, byte[] read, long readTimestamp) {
-    long snapshotTimestamp = snapshot == null ? readTimestamp : Math.min(readTimestamp, snapshot);
-    if (parentArray != null) {
-      // This is currently less efficient than I would like. Basically you should do the other reads
-      // and only call the parent when there are gaps. Instead, we are calling all parents for
-      // all reads and that just scales poorly as you make a deeper hierarchy.
-      parentArray.read(tx, offset, read, snapshotTimestamp);
+  static class BlocksRead {
+    private final int total;
+    private Set<Long> blocksRead;
+
+    BlocksRead(int total) {
+      this.total = total;
+      blocksRead = new HashSet<>(total);
     }
+
+    boolean done() {
+      return blocksRead.size() == total;
+    }
+
+    boolean read(long block) {
+      return blocksRead.add(block);
+    }
+  }
+
+  private void read(ReadTransaction tx, long offset, byte[] read, long readTimestamp, BlocksRead blocksRead) {
+    long snapshotTimestamp = snapshot == null ? readTimestamp : Math.min(readTimestamp, snapshot);
     long firstBlock = offset / blockSize;
     int blockOffset = (int) (offset % blockSize);
     int length = read.length;
     long lastBlock = (offset + length) / blockSize;
     long currentBlockId = -1;
     byte[] currentValue = null;
+    if (parentArray != null && blocksRead == null) {
+      blocksRead = new BlocksRead((int) (lastBlock - firstBlock + 1));
+    }
     for (KeyValue keyValue : tx.getRange(data.get(firstBlock).pack(), data.get(lastBlock + 1).pack())) {
       Tuple keyTuple = data.unpack(keyValue.getKey());
       long blockId = keyTuple.getLong(0);
       if (blockId != currentBlockId && currentBlockId != -1) {
         // Only copy blocks that we are going to use
-        copy(read, firstBlock, blockOffset, lastBlock, currentValue, currentBlockId);
+        copy(read, firstBlock, blockOffset, lastBlock, currentValue, currentBlockId, blocksRead);
         currentValue = null;
       }
       // Advance the current block id
@@ -269,23 +286,31 @@ public class FDBArray {
         currentValue = keyValue.getValue();
       }
     }
-    copy(read, firstBlock, blockOffset, lastBlock, currentValue, currentBlockId);
+    copy(read, firstBlock, blockOffset, lastBlock, currentValue, currentBlockId, blocksRead);
+    if (parentArray != null && !blocksRead.done()) {
+      // This is currently less efficient than I would like. Basically you should do the other reads
+      // and only call the parent when there are gaps. Instead, we are calling all parents for
+      // all reads and that just scales poorly as you make a deeper hierarchy.
+      parentArray.read(tx, offset, read, snapshotTimestamp, blocksRead);
+    }
   }
 
-  private void copy(byte[] read, long firstBlock, int blockOffset, long lastBlock, byte[] currentValue, long blockId) {
+  private void copy(byte[] read, long firstBlock, int blockOffset, long lastBlock, byte[] currentValue, long blockId, BlocksRead blocksRead) {
     if (currentValue != null) {
-      int blockPosition = (int) ((blockId - firstBlock) * blockSize);
-      int shift = blockSize - blockOffset;
-      if (blockId == firstBlock) {
-        int firstBlockLength = Math.min(shift, read.length);
-        System.arraycopy(currentValue, blockOffset, read, 0, firstBlockLength);
-      } else {
-        int position = blockPosition - blockSize + shift;
-        if (blockId == lastBlock) {
-          int lastLength = read.length - position;
-          System.arraycopy(currentValue, 0, read, position, lastLength);
+      if (blocksRead == null || blocksRead.read(blockId)) {
+        int blockPosition = (int) ((blockId - firstBlock) * blockSize);
+        int shift = blockSize - blockOffset;
+        if (blockId == firstBlock) {
+          int firstBlockLength = Math.min(shift, read.length);
+          System.arraycopy(currentValue, blockOffset, read, 0, firstBlockLength);
         } else {
-          System.arraycopy(currentValue, 0, read, position, blockSize);
+          int position = blockPosition - blockSize + shift;
+          if (blockId == lastBlock) {
+            int lastLength = read.length - position;
+            System.arraycopy(currentValue, 0, read, position, lastLength);
+          } else {
+            System.arraycopy(currentValue, 0, read, position, blockSize);
+          }
         }
       }
     }

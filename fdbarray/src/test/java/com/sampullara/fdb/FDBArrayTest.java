@@ -99,17 +99,17 @@ public class FDBArrayTest {
   @Test
   public void testParent() {
     Random r = new Random(1337);
-    byte[] parentBytes = new byte[1000];
+    byte[] parentBytes = new byte[2000];
     r.nextBytes(parentBytes);
     fdbArray.write(parentBytes, 1000).get();
-    byte[] parentRead = new byte[1000];
+    byte[] parentRead = new byte[2000];
     fdbArray.read(parentRead, 1000).get();
     assertArrayEquals(parentBytes, parentRead);
 
     // Should start with a snapshot of the parent, need to delete first for testing
     FDBArray fdbChildArray = fdbArray.snapshot("testChildArray");
     try {
-      byte[] childRead = new byte[1000];
+      byte[] childRead = new byte[2000];
       fdbChildArray.read(childRead, 1000).get();
       assertArrayEquals(parentBytes, childRead);
 
@@ -117,7 +117,7 @@ public class FDBArrayTest {
       r.nextBytes(childBytes);
       fdbChildArray.write(childBytes, 1500).get();
 
-      byte[] mixedRead = new byte[1500];
+      byte[] mixedRead = new byte[2000];
       fdbChildArray.read(mixedRead, 1000).get();
 
       for (int i = 0; i < 500; i++) {
@@ -125,6 +125,9 @@ public class FDBArrayTest {
       }
       for (int i = 500; i < 1500; i++) {
         assertEquals("Failed: " + i, childBytes[i - 500], mixedRead[i]);
+      }
+      for (int i = 1500; i < 2000; i++) {
+        assertEquals("Failed: " + i, parentBytes[i], mixedRead[i]);
       }
     } finally {
       fdbChildArray.delete();
