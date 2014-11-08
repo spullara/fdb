@@ -2,6 +2,8 @@ package com.sampullara.fdb;
 
 import com.foundationdb.Database;
 import com.foundationdb.FDB;
+import jdk.nashorn.internal.ir.annotations.Ignore;
+import org.HdrHistogram.Histogram;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
@@ -10,6 +12,7 @@ import org.junit.Test;
 
 import java.util.Arrays;
 import java.util.Random;
+import java.util.concurrent.Semaphore;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
@@ -142,5 +145,55 @@ public class FDBArrayTest {
       assertArrayEquals("Iteration: " + i + ", " + length + ", " + offset, bytes, read);
     }
     assertEquals((110000 / 512 + 1) * 512, fdbArray.usage().get().longValue());
+  }
+
+  @Test
+  @Ignore
+  public void testRandomReadWriteBenchmark() {
+    Histogram readLatencies = new Histogram(10000000000l, 5);
+    Histogram writeLatencies = new Histogram(10000000000l, 5);
+    Random r = new Random(1337);
+    Semaphore semaphore = new Semaphore(100);
+    int TOTAL = 10000;
+    for (int i = 0; i < TOTAL; i++) {
+      {
+        int length = r.nextInt(10000);
+        byte[] bytes = new byte[length];
+        r.nextBytes(bytes);
+        int offset = r.nextInt(10000000);
+        semaphore.acquireUninterruptibly();
+        long startWrite = System.nanoTime();
+        fdbArray.write(bytes, offset).onReady(() -> {
+          semaphore.release();
+          long writeLatency = System.nanoTime() - startWrite;
+          writeLatencies.recordValue(writeLatency);
+        });
+      };
+      {
+        int length = r.nextInt(10000);
+        int offset = r.nextInt(10000000);
+        byte[] read = new byte[length];
+        semaphore.acquireUninterruptibly();
+        long startRead = System.nanoTime();
+        fdbArray.read(read, offset).onReady(() -> {
+          semaphore.release();
+          long readLatency = System.nanoTime() - startRead;
+          readLatencies.recordValue(readLatency);
+        });
+      };
+    }
+    semaphore.acquireUninterruptibly(100);
+    percentiles("Writes", writeLatencies);
+    percentiles("Reads", readLatencies);
+  }
+
+  private void percentiles(final String title, Histogram h) {
+    System.out.println(title + ": " +
+            " Mean: " + h.getMean()/1e6 +
+            " p50: " + h.getValueAtPercentile(50)/1e6 +
+            " p95: " + h.getValueAtPercentile(95)/1e6 +
+            " p99: " + h.getValueAtPercentile(99)/1e6 +
+            " p999: " + h.getValueAtPercentile(999)/1e6
+    );
   }
 }

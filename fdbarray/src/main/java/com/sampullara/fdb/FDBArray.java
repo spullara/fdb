@@ -241,7 +241,12 @@ public class FDBArray {
 
   private void read(ReadTransaction tx, long offset, byte[] read, long readTimestamp) {
     long snapshotTimestamp = snapshot == null ? readTimestamp : Math.min(readTimestamp, snapshot);
-    if (parentArray != null) parentArray.read(tx, offset, read, snapshotTimestamp);
+    if (parentArray != null) {
+      // This is currently less efficient than I would like. Basically you should do the other reads
+      // and only call the parent when there are gaps. Instead, we are calling all parents for
+      // all reads and that just scales poorly as you make a deeper hierarchy.
+      parentArray.read(tx, offset, read, snapshotTimestamp);
+    }
     long firstBlock = offset / blockSize;
     int blockOffset = (int) (offset % blockSize);
     int length = read.length;
