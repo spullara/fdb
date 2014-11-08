@@ -10,7 +10,9 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Random;
 import java.util.concurrent.Semaphore;
 
@@ -153,41 +155,51 @@ public class FDBArrayTest {
   @Test
   @Ignore
   public void testRandomReadWriteBenchmark() {
-    Histogram readLatencies = new Histogram(10000000000l, 5);
-    Histogram writeLatencies = new Histogram(10000000000l, 5);
-    Random r = new Random(1337);
-    Semaphore semaphore = new Semaphore(100);
-    int TOTAL = 10000;
-    for (int i = 0; i < TOTAL; i++) {
-      {
-        int length = r.nextInt(10000);
-        byte[] bytes = new byte[length];
-        r.nextBytes(bytes);
-        int offset = r.nextInt(10000000);
-        semaphore.acquireUninterruptibly();
-        long startWrite = System.nanoTime();
-        fdbArray.write(bytes, offset).onReady(() -> {
-          semaphore.release();
-          long writeLatency = System.nanoTime() - startWrite;
-          writeLatencies.recordValue(writeLatency);
-        });
-      };
-      {
-        int length = r.nextInt(10000);
-        int offset = r.nextInt(10000000);
-        byte[] read = new byte[length];
-        semaphore.acquireUninterruptibly();
-        long startRead = System.nanoTime();
-        fdbArray.read(read, offset).onReady(() -> {
-          semaphore.release();
-          long readLatency = System.nanoTime() - startRead;
-          readLatencies.recordValue(readLatency);
-        });
-      };
+    List<FDBArray> arrays = new ArrayList<>();
+    FDBArray fdbArray = FDBArrayTest.fdbArray;
+    try {
+      for (int j = 0; j < 3; j++) {
+        Histogram readLatencies = new Histogram(10000000000l, 5);
+        Histogram writeLatencies = new Histogram(10000000000l, 5);
+        Random r = new Random(1337);
+        Semaphore semaphore = new Semaphore(100);
+        int TOTAL = 10000;
+        for (int i = 0; i < TOTAL; i++) {
+          {
+            int length = r.nextInt(10000);
+            byte[] bytes = new byte[length];
+            r.nextBytes(bytes);
+            int offset = r.nextInt(100000000);
+            semaphore.acquireUninterruptibly();
+            long startWrite = System.nanoTime();
+            fdbArray.write(bytes, offset).onReady(() -> {
+              semaphore.release();
+              long writeLatency = System.nanoTime() - startWrite;
+              writeLatencies.recordValue(writeLatency);
+            });
+          };
+          {
+            int length = r.nextInt(10000);
+            int offset = r.nextInt(100000000);
+            byte[] read = new byte[length];
+            semaphore.acquireUninterruptibly();
+            long startRead = System.nanoTime();
+            fdbArray.read(read, offset).onReady(() -> {
+              semaphore.release();
+              long readLatency = System.nanoTime() - startRead;
+              readLatencies.recordValue(readLatency);
+            });
+          };
+        }
+        semaphore.acquireUninterruptibly(100);
+        percentiles("Writes", writeLatencies);
+        percentiles("Reads", readLatencies);
+        fdbArray = fdbArray.snapshot("test" + j);
+        arrays.add(0, fdbArray);
+      }
+    } finally {
+      arrays.forEach(FDBArray::delete);
     }
-    semaphore.acquireUninterruptibly(100);
-    percentiles("Writes", writeLatencies);
-    percentiles("Reads", readLatencies);
   }
 
   private void percentiles(final String title, Histogram h) {
