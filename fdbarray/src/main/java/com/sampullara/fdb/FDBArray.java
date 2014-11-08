@@ -2,6 +2,7 @@ package com.sampullara.fdb;
 
 import com.foundationdb.Database;
 import com.foundationdb.KeyValue;
+import com.foundationdb.ReadTransaction;
 import com.foundationdb.Transaction;
 import com.foundationdb.async.Function;
 import com.foundationdb.async.Future;
@@ -121,18 +122,22 @@ public class FDBArray {
     return database.runAsync(new Function<Transaction, Future<Void>>() {
       @Override
       public Future<Void> apply(Transaction tx) {
+        // Use a single buffer for all full blocksize writes
         byte[] bytes = buffer.get();
-        long firstBlock = offset / blockSize;
+
+        // Calculate the block locations
         int length = write.length;
-        int blockOffset = (int) (offset % blockSize);
+        long firstBlock = offset / blockSize;
         long lastBlock = (offset + length) / blockSize;
+        int blockOffset = (int) (offset % blockSize);
         int shift = blockSize - blockOffset;
+
         // Special case first block and last block
         byte[] firstBlockKey = data.get(firstBlock).get(System.currentTimeMillis()).pack();
         if (blockOffset > 0 || (blockOffset == 0 && length < blockSize)) {
           // Only need to do this if the first block is partial
           byte[] readBytes = new byte[blockSize];
-          FDBArray.this.read(tx, firstBlock * blockSize, readBytes, Long.MAX_VALUE);
+          read(tx, firstBlock * blockSize, readBytes, Long.MAX_VALUE);
           int writeLength = Math.min(length, shift);
           System.arraycopy(write, 0, readBytes, blockOffset, writeLength);
           tx.set(firstBlockKey, readBytes);
@@ -141,6 +146,7 @@ public class FDBArray {
           System.arraycopy(write, 0, bytes, 0, blockSize);
           tx.set(firstBlockKey, bytes);
         }
+        // If there is more than one block
         if (lastBlock > firstBlock) {
           // For the blocks in the middle we can just blast values in without looking at the current bytes
           for (long i = firstBlock + 1; i < lastBlock; i++) {
@@ -150,12 +156,19 @@ public class FDBArray {
             System.arraycopy(write, position, bytes, 0, blockSize);
             tx.set(key, bytes);
           }
-          byte[] lastBlockKey = data.get(lastBlock).get(System.currentTimeMillis()).pack();
-          byte[] readBytes = new byte[blockSize];
-          FDBArray.this.read(tx, lastBlock * blockSize, readBytes, Long.MAX_VALUE);
           int position = (int) ((lastBlock - firstBlock - 1) * blockSize + shift);
-          System.arraycopy(write, position, readBytes, 0, length - position);
-          tx.set(lastBlockKey, readBytes);
+          int lastBlockLength = length - position;
+          byte[] lastBlockKey = data.get(lastBlock).get(System.currentTimeMillis()).pack();
+          // If the last block is a complete block we don't need to read
+          if (lastBlockLength == blockSize) {
+            System.arraycopy(write, position, bytes, 0, blockSize);
+            tx.set(lastBlockKey, bytes);
+          } else {
+            byte[] readBytes = new byte[blockSize];
+            read(tx, lastBlock * blockSize, readBytes, Long.MAX_VALUE);
+            System.arraycopy(write, position, readBytes, 0, lastBlockLength);
+            tx.set(lastBlockKey, readBytes);
+          }
         }
         return ReadyFuture.DONE;
       }
@@ -185,13 +198,13 @@ public class FDBArray {
     return database.runAsync(new Function<Transaction, Future<Void>>() {
       @Override
       public Future<Void> apply(Transaction tx) {
-        FDBArray.this.read(tx, offset, read, timestamp);
+        read(tx, offset, read, timestamp);
         return ReadyFuture.DONE;
       }
     });
   }
 
-  private void read(Transaction tx, long offset, byte[] read, long readTimestamp) {
+  private void read(ReadTransaction tx, long offset, byte[] read, long readTimestamp) {
     long snapshotTimestamp = snapshot == null ? readTimestamp : Math.min(readTimestamp, snapshot);
     if (parentArray != null) parentArray.read(tx, offset, read, snapshotTimestamp);
     long firstBlock = offset / blockSize;
