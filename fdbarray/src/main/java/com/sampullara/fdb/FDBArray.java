@@ -22,14 +22,16 @@ public class FDBArray {
   // Metadata keys
   private static final String BLOCK_SIZE_KEY = "block_size";
   private static final String PARENT_KEY = "parent";
+  private static final String PARENT_TIMESTAMP_KEY = "parent_timestamp";
 
   // Location in the database
   private final DirectorySubspace metadata;
   private final DirectorySubspace data;
   private final Database database;
-  private final DirectorySubspace ds;
   private final int blockSize;
   private final FDBArray parentArray;
+  private final DirectorySubspace ds;
+  private final Long snapshot;
 
   // Used for copies
   private final ThreadLocal<byte[]> buffer = new ThreadLocal<byte[]>() {
@@ -39,16 +41,15 @@ public class FDBArray {
     }
   };
 
-  public static FDBArray create(Database database, DirectorySubspace ds, int blockSize, DirectorySubspace parent) {
+  public static FDBArray create(Database database, DirectorySubspace ds, int blockSize, DirectorySubspace parent, long timestamp) {
     DirectorySubspace metadata = ds.create(database, Arrays.asList("metadata")).get();
     if (parent != null) {
       List<String> parentPath = parent.getPath();
-      byte[] parentPathKey = metadata.get(PARENT_KEY).pack();
       database.run(new Function<Transaction, Void>() {
         @Override
         public Void apply(Transaction tx) {
-          Tuple pathTuple = Tuple.fromList(parentPath);
-          tx.set(parentPathKey, pathTuple.pack());
+          tx.set(metadata.get(PARENT_KEY).pack(), Tuple.fromList(parentPath).pack());
+          tx.set(metadata.get(PARENT_TIMESTAMP_KEY).pack(), Tuple.from(timestamp).pack());
           return null;
         }
       });
@@ -63,16 +64,10 @@ public class FDBArray {
     return new FDBArray(database, ds);
   }
 
-  /**
-   * Arrays are 0 indexed byte arrays using blockSize bytes per value.
-   *
-   * @param blockSize
-   * @param type
-   * @param database
-   */
-  public FDBArray(Database database, DirectorySubspace ds) {
-    this.database = database;
+  public FDBArray(Database database, DirectorySubspace ds, Long snapshot) {
     this.ds = ds;
+    this.snapshot = snapshot;
+    this.database = database;
     this.metadata = ds.createOrOpen(database, Arrays.asList("metadata")).get();
     this.data = ds.createOrOpen(database, Arrays.asList("data")).get();
     Integer currentBlocksize = database.run(new Function<Transaction, Integer>() {
@@ -96,17 +91,33 @@ public class FDBArray {
       @Override
       public FDBArray apply(Transaction tx) {
         byte[] parentPathValue = tx.get(metadata.get(PARENT_KEY).pack()).get();
+        byte[] parentTimestampBytes = tx.get(metadata.get(PARENT_TIMESTAMP_KEY).pack()).get();
         if (parentPathValue == null) {
           return null;
         } else {
           List<String> items = (List) Tuple.fromBytes(parentPathValue).getItems();
-          return new FDBArray(database, DirectoryLayer.getDefault().open(database, items).get());
+          long parentTimestamp = Tuple.fromBytes(parentTimestampBytes).getLong(0);
+          return new FDBArray(database, DirectoryLayer.getDefault().open(database, items).get(), parentTimestamp);
         }
       }
     });
   }
 
+  /**
+   * Arrays are 0 indexed byte arrays using blockSize bytes per value.
+   *
+   * @param blockSize
+   * @param type
+   * @param database
+   */
+  public FDBArray(Database database, DirectorySubspace ds) {
+    this(database, ds, null);
+  }
+
   public Future<Void> write(byte[] write, long offset) {
+    if (snapshot != null) {
+      throw new IllegalStateException("FDBArray is read only");
+    }
     return database.runAsync(new Function<Transaction, Future<Void>>() {
       @Override
       public Future<Void> apply(Transaction tx) {
@@ -185,10 +196,11 @@ public class FDBArray {
    *
    * @param read
    * @param offset
-   * @param snapshotTimestamp
+   * @param timestamp
    * @return
    */
-  public Future<Void> read(byte[] read, long offset, long snapshotTimestamp) {
+  public Future<Void> read(byte[] read, long offset, long timestamp) {
+    long snapshotTimestamp = snapshot == null ? timestamp : Math.min(timestamp, snapshot);
     Future<Void> parentRead = parentArray == null ? ReadyFuture.DONE : parentArray.read(read, offset, snapshotTimestamp);
     return parentRead.flatMap(done -> database.runAsync(new Function<Transaction, Future<Void>>() {
       @Override
@@ -226,6 +238,10 @@ public class FDBArray {
         return ReadyFuture.DONE;
       }
     }));
+  }
+
+  public FDBArray snapshot() {
+    return new FDBArray(database, ds, System.currentTimeMillis());
   }
 
   public void clear() {
