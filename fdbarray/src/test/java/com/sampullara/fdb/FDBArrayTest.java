@@ -198,7 +198,11 @@ public class FDBArrayTest {
         arrays.add(0, fdbArray);
       }
     } finally {
-      arrays.forEach(FDBArray::delete);
+      arrays.forEach((array) -> {
+        System.out.println("Usage: " + array.usage().get());
+        array.delete();
+      });
+      System.out.println("Usage: " + FDBArrayTest.fdbArray.usage().get());
     }
   }
 
