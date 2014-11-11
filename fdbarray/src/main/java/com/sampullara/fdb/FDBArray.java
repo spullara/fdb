@@ -332,9 +332,9 @@ public class FDBArray {
         return null;
       }
     });
-    List<String> childDirectory = Arrays.asList(name);
+    List<String> childDirectory = Arrays.asList("com.sampullara.fdb.array", name);
     DirectorySubspace childDs = DirectoryLayer.getDefault().create(database, childDirectory).get();
-    FDBArray.create(database, childDs, 512, ds, System.currentTimeMillis());
+    FDBArray.create(database, childDs, blockSize, ds, System.currentTimeMillis());
     return new FDBArray(database, childDs);
   }
 
@@ -385,11 +385,12 @@ public class FDBArray {
   }
 
   public byte[] getMetadata(byte[] key) {
-    return database.run(new Function<Transaction, byte[]>() {
+    byte[] value = database.run(new Function<Transaction, byte[]>() {
       @Override
       public byte[] apply(Transaction tx) {
-        return tx.get(key).get();
+        return tx.get(metadata.get(key).pack()).get();
       }
     });
+    return value == null ? parentArray == null ? null : parentArray.getMetadata(key) : value;
   }
 }
