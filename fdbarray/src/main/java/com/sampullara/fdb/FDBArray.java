@@ -1,16 +1,9 @@
 package com.sampullara.fdb;
 
-import com.foundationdb.Database;
-import com.foundationdb.KeyValue;
-import com.foundationdb.MutationType;
-import com.foundationdb.ReadTransaction;
-import com.foundationdb.Transaction;
-import com.foundationdb.async.Function;
-import com.foundationdb.async.Future;
-import com.foundationdb.async.ReadyFuture;
-import com.foundationdb.directory.DirectoryLayer;
-import com.foundationdb.directory.DirectorySubspace;
-import com.foundationdb.tuple.Tuple;
+import com.apple.foundationdb.*;
+import com.apple.foundationdb.directory.DirectoryLayer;
+import com.apple.foundationdb.directory.DirectorySubspace;
+import com.apple.foundationdb.tuple.Tuple;
 import com.google.common.primitives.Ints;
 import com.google.common.primitives.Longs;
 
@@ -18,6 +11,9 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.function.Function;
 
 /**
  * Block storage in FDB
@@ -58,59 +54,58 @@ public class FDBArray {
   };
 
   public static FDBArray open(Database database, String name) {
-    DirectorySubspace ds = dl.open(database, Arrays.asList("com.sampullara.fdb.array", name)).get();
+    DirectorySubspace ds = get(dl.open(database, Arrays.asList("com.sampullara.fdb.array", name)));
     return new FDBArray(database, ds);
   }
 
   public static FDBArray open(Database database, String name, long timestamp) {
-    DirectorySubspace ds = dl.open(database, Arrays.asList("com.sampullara.fdb.array", name)).get();
+    DirectorySubspace ds = get(dl.open(database, Arrays.asList("com.sampullara.fdb.array", name)));
     return new FDBArray(database, ds, timestamp);
   }
 
   public static FDBArray create(Database database, String name, int blockSize) {
-    DirectorySubspace ds = dl.create(database, Arrays.asList("com.sampullara.fdb.array", name)).get();
+    DirectorySubspace ds = get(dl.create(database, Arrays.asList("com.sampullara.fdb.array", name)));
     return create(database, ds, blockSize, null, 0);
   }
 
   protected static FDBArray create(Database database, DirectorySubspace ds, int blockSize, DirectorySubspace parent, long timestamp) {
-    DirectorySubspace metadata = ds.create(database, Arrays.asList("metadata")).get();
+    DirectorySubspace metadata = get(ds.create(database, Arrays.asList("metadata")));
     if (parent != null) {
       List<String> parentPath = parent.getPath();
-      database.run(new Function<Transaction, Void>() {
-        @Override
-        public Void apply(Transaction tx) {
-          tx.set(metadata.get(PARENT_KEY).pack(), Tuple.fromList(parentPath).pack());
-          tx.set(metadata.get(PARENT_TIMESTAMP_KEY).pack(), Tuple.from(timestamp).pack());
-          return null;
-        }
+      database.run((Function<Transaction, Void>) tx -> {
+        tx.set(metadata.get(PARENT_KEY).pack(), Tuple.fromList(parentPath).pack());
+        tx.set(metadata.get(PARENT_TIMESTAMP_KEY).pack(), Tuple.from(timestamp).pack());
+        return null;
       });
     }
-    database.run(new Function<Transaction, Void>() {
-      @Override
-      public Void apply(Transaction tx) {
-        tx.set(metadata.get(BLOCK_SIZE_KEY).pack(), Ints.toByteArray(blockSize));
-        return null;
-      }
+    database.run((Function<Transaction, Void>) tx -> {
+      tx.set(metadata.get(BLOCK_SIZE_KEY).pack(), Ints.toByteArray(blockSize));
+      return null;
     });
     return new FDBArray(database, ds);
+  }
+
+  private static <T> T get(CompletableFuture<T> future) {
+    try {
+      return future.get();
+    } catch (ExecutionException | InterruptedException e) {
+      throw new RuntimeException(e);
+    }
   }
 
   protected FDBArray(Database database, DirectorySubspace ds, Long snapshot) {
     this.ds = ds;
     this.snapshot = snapshot;
     this.database = database;
-    this.metadata = ds.createOrOpen(database, Arrays.asList("metadata")).get();
-    this.data = ds.createOrOpen(database, Arrays.asList("data")).get();
-    Integer currentBlocksize = database.run(new Function<Transaction, Integer>() {
-      @Override
-      public Integer apply(Transaction tx) {
-        byte[] key = metadata.get(BLOCK_SIZE_KEY).pack();
-        byte[] currentBlockSize = tx.get(key).get();
-        if (currentBlockSize == null) {
-          return null;
-        } else {
-          return Ints.fromByteArray(currentBlockSize);
-        }
+    this.metadata = get(ds.createOrOpen(database, Arrays.asList("metadata")));
+    this.data = get(ds.createOrOpen(database, Arrays.asList("data")));
+    Integer currentBlocksize = database.run((Function<Transaction, Integer>) tx -> {
+      byte[] key = metadata.get(BLOCK_SIZE_KEY).pack();
+      byte[] currentBlockSize = get(tx.get(key));
+      if (currentBlockSize == null) {
+        return null;
+      } else {
+        return Ints.fromByteArray(currentBlockSize);
       }
     });
     if (currentBlocksize == null) {
@@ -118,18 +113,15 @@ public class FDBArray {
     } else {
       blockSize = currentBlocksize;
     }
-    parentArray = database.run(new Function<Transaction, FDBArray>() {
-      @Override
-      public FDBArray apply(Transaction tx) {
-        byte[] parentPathValue = tx.get(metadata.get(PARENT_KEY).pack()).get();
-        byte[] parentTimestampBytes = tx.get(metadata.get(PARENT_TIMESTAMP_KEY).pack()).get();
-        if (parentPathValue == null) {
-          return null;
-        } else {
-          List<String> items = (List) Tuple.fromBytes(parentPathValue).getItems();
-          long parentTimestamp = Tuple.fromBytes(parentTimestampBytes).getLong(0);
-          return new FDBArray(database, DirectoryLayer.getDefault().open(database, items).get(), parentTimestamp);
-        }
+    parentArray = database.run(tx -> {
+      byte[] parentPathValue = get(tx.get(metadata.get(PARENT_KEY).pack()));
+      byte[] parentTimestampBytes = get(tx.get(metadata.get(PARENT_TIMESTAMP_KEY).pack()));
+      if (parentPathValue == null) {
+        return null;
+      } else {
+        List<String> items = (List) Tuple.fromBytes(parentPathValue).getItems();
+        long parentTimestamp = Tuple.fromBytes(parentTimestampBytes).getLong(0);
+        return new FDBArray(database, get(DirectoryLayer.getDefault().open(database, items)), parentTimestamp);
       }
     });
     dependents = metadata.get(DEPENDENTS).pack();
@@ -140,76 +132,68 @@ public class FDBArray {
     this(database, ds, null);
   }
 
-  public Future<Void> write(byte[] write, long offset) {
+  public CompletableFuture<Void> write(byte[] write, long offset) {
     if (snapshot != null) {
       throw new IllegalStateException("FDBArray is read only");
     }
-    return database.runAsync(new Function<Transaction, Future<Void>>() {
-      @Override
-      public Future<Void> apply(Transaction tx) {
-        // Use a single buffer for all full blocksize writes
-        byte[] bytes = buffer.get();
+    return database.runAsync(tx -> {
+      // Use a single buffer for all full blocksize writes
+      byte[] bytes = buffer.get();
 
-        // Calculate the block locations
-        int length = write.length;
-        long firstBlock = offset / blockSize;
-        long lastBlock = (offset + length) / blockSize;
-        int blockOffset = (int) (offset % blockSize);
-        int shift = blockSize - blockOffset;
+      // Calculate the block locations
+      int length = write.length;
+      long firstBlock = offset / blockSize;
+      long lastBlock = (offset + length) / blockSize;
+      int blockOffset = (int) (offset % blockSize);
+      int shift = blockSize - blockOffset;
 
-        // Track where we have written so we can estimate usage later
-        usedBlocks.set(firstBlock, lastBlock);
+      // Track where we have written so we can estimate usage later
+      usedBlocks.set(firstBlock, lastBlock);
 
-        // Special case first block and last block
-        byte[] firstBlockKey = data.get(firstBlock).get(System.currentTimeMillis()).pack();
-        if (blockOffset > 0 || (blockOffset == 0 && length < blockSize)) {
-          // Only need to do this if the first block is partial
-          byte[] readBytes = new byte[blockSize];
-          read(tx, firstBlock * blockSize, readBytes, Long.MAX_VALUE, null);
-          int writeLength = Math.min(length, shift);
-          System.arraycopy(write, 0, readBytes, blockOffset, writeLength);
-          tx.set(firstBlockKey, readBytes);
-        } else {
-          // In this case copy the full first block blindly
-          System.arraycopy(write, 0, bytes, 0, blockSize);
-          tx.set(firstBlockKey, bytes);
-        }
-        // If there is more than one block
-        if (lastBlock > firstBlock) {
-          // For the blocks in the middle we can just blast values in without looking at the current bytes
-          for (long i = firstBlock + 1; i < lastBlock; i++) {
-            byte[] key = data.get(i).get(System.currentTimeMillis()).pack();
-            int writeBlock = (int) (i - firstBlock);
-            int position = (writeBlock - 1) * blockSize + shift;
-            System.arraycopy(write, position, bytes, 0, blockSize);
-            tx.set(key, bytes);
-          }
-          int position = (int) ((lastBlock - firstBlock - 1) * blockSize + shift);
-          int lastBlockLength = length - position;
-          byte[] lastBlockKey = data.get(lastBlock).get(System.currentTimeMillis()).pack();
-          // If the last block is a complete block we don't need to read
-          if (lastBlockLength == blockSize) {
-            System.arraycopy(write, position, bytes, 0, blockSize);
-            tx.set(lastBlockKey, bytes);
-          } else {
-            byte[] readBytes = new byte[blockSize];
-            read(tx, lastBlock * blockSize, readBytes, Long.MAX_VALUE, null);
-            System.arraycopy(write, position, readBytes, 0, lastBlockLength);
-            tx.set(lastBlockKey, readBytes);
-          }
-        }
-        return ReadyFuture.DONE;
+      // Special case first block and last block
+      byte[] firstBlockKey = data.get(firstBlock).get(System.currentTimeMillis()).pack();
+      if (blockOffset > 0 || (blockOffset == 0 && length < blockSize)) {
+        // Only need to do this if the first block is partial
+        byte[] readBytes = new byte[blockSize];
+        read(tx, firstBlock * blockSize, readBytes, Long.MAX_VALUE, null);
+        int writeLength = Math.min(length, shift);
+        System.arraycopy(write, 0, readBytes, blockOffset, writeLength);
+        tx.set(firstBlockKey, readBytes);
+      } else {
+        // In this case copy the full first block blindly
+        System.arraycopy(write, 0, bytes, 0, blockSize);
+        tx.set(firstBlockKey, bytes);
       }
+      // If there is more than one block
+      if (lastBlock > firstBlock) {
+        // For the blocks in the middle we can just blast values in without looking at the current bytes
+        for (long i = firstBlock + 1; i < lastBlock; i++) {
+          byte[] key = data.get(i).get(System.currentTimeMillis()).pack();
+          int writeBlock = (int) (i - firstBlock);
+          int position = (writeBlock - 1) * blockSize + shift;
+          System.arraycopy(write, position, bytes, 0, blockSize);
+          tx.set(key, bytes);
+        }
+        int position = (int) ((lastBlock - firstBlock - 1) * blockSize + shift);
+        int lastBlockLength = length - position;
+        byte[] lastBlockKey = data.get(lastBlock).get(System.currentTimeMillis()).pack();
+        // If the last block is a complete block we don't need to read
+        if (lastBlockLength == blockSize) {
+          System.arraycopy(write, position, bytes, 0, blockSize);
+          tx.set(lastBlockKey, bytes);
+        } else {
+          byte[] readBytes = new byte[blockSize];
+          read(tx, lastBlock * blockSize, readBytes, Long.MAX_VALUE, null);
+          System.arraycopy(write, position, readBytes, 0, lastBlockLength);
+          tx.set(lastBlockKey, readBytes);
+        }
+      }
+      return CompletableFuture.completedFuture(null);
     });
   }
 
-  public Future<Long> usage() {
-    return usedBlocks.count().map(new Function<Long, Long>() {
-      @Override
-      public Long apply(Long usedBlocks) {
-        return usedBlocks * blockSize;
-      }
-    });
+  public CompletableFuture<Long> usage() {
+    return usedBlocks.count().thenApply(usedBlocks -> usedBlocks * blockSize);
   }
 
   /**
@@ -219,7 +203,7 @@ public class FDBArray {
    * @param offset
    * @return
    */
-  public Future<Void> read(byte[] read, long offset) {
+  public CompletableFuture<Void> read(byte[] read, long offset) {
     return read(read, offset, Long.MAX_VALUE);
   }
 
@@ -231,13 +215,10 @@ public class FDBArray {
    * @param timestamp
    * @return
    */
-  public Future<Void> read(byte[] read, long offset, long timestamp) {
-    return database.runAsync(new Function<Transaction, Future<Void>>() {
-      @Override
-      public Future<Void> apply(Transaction tx) {
-        read(tx, offset, read, timestamp, null);
-        return ReadyFuture.DONE;
-      }
+  public CompletableFuture<Void> read(byte[] read, long offset, long timestamp) {
+    return database.runAsync(tx -> {
+      read(tx, offset, read, timestamp, null);
+      return CompletableFuture.completedFuture(null);
     });
   }
 
@@ -325,72 +306,53 @@ public class FDBArray {
   }
 
   public FDBArray snapshot(String name) {
-    database.run(new Function<Transaction, Object>() {
-      @Override
-      public Object apply(Transaction tx) {
-        tx.mutate(MutationType.ADD, dependents, ONE);
-        return null;
-      }
+    database.run(tx -> {
+      tx.mutate(MutationType.ADD, dependents, ONE);
+      return null;
     });
     List<String> childDirectory = Arrays.asList("com.sampullara.fdb.array", name);
-    DirectorySubspace childDs = DirectoryLayer.getDefault().create(database, childDirectory).get();
+    DirectorySubspace childDs = get(DirectoryLayer.getDefault().create(database, childDirectory));
     FDBArray.create(database, childDs, blockSize, ds, System.currentTimeMillis());
     return new FDBArray(database, childDs);
   }
 
   public void clear() {
-    database.run(new Function<Transaction, Void>() {
-      @Override
-      public Void apply(Transaction tx) {
-        tx.clear(data.pack());
-        return null;
-      }
+    database.run((Function<Transaction, Void>) tx -> {
+      tx.clear(data.pack());
+      usedBlocks.clear(tx);
+      return null;
     });
   }
 
   private void dependentDeleted() {
-    database.run(new Function<Transaction, Object>() {
-      @Override
-      public Object apply(Transaction tx) {
-        tx.mutate(MutationType.ADD, dependents, MINUS_ONE);
-        return null;
-      }
+    database.run(tx -> {
+      tx.mutate(MutationType.ADD, dependents, MINUS_ONE);
+      return null;
     });
   }
 
   public void delete() {
-    boolean deletable = database.run(new Function<Transaction, Boolean>() {
-      @Override
-      public Boolean apply(Transaction tx) {
-        byte[] bytes = tx.get(dependents).get();
-        return bytes == null || Longs.fromByteArray(bytes) == 0;
-      }
+    boolean deletable = database.run(tx -> {
+      byte[] bytes = get(tx.get(dependents));
+      return bytes == null || Longs.fromByteArray(bytes) == 0;
     });
     if (deletable) {
       if (parentArray != null) parentArray.dependentDeleted();
-      ds.remove(database).get();
+      get(ds.remove(database));
     } else {
       throw new IllegalStateException("Array still has dependents");
     }
   }
 
   public void setMetadata(byte[] key, byte[] value) {
-    database.run(new Function<Transaction, Object>() {
-      @Override
-      public Object apply(Transaction tx) {
-        tx.set(metadata.get(key).pack(), value);
-        return null;
-      }
+    database.run(tx -> {
+      tx.set(metadata.get(key).pack(), value);
+      return null;
     });
   }
 
   public byte[] getMetadata(byte[] key) {
-    byte[] value = database.run(new Function<Transaction, byte[]>() {
-      @Override
-      public byte[] apply(Transaction tx) {
-        return tx.get(metadata.get(key).pack()).get();
-      }
-    });
+    byte[] value = database.run((Function<Transaction, byte[]>) tx -> get(tx.get(metadata.get(key).pack())));
     return value == null ? parentArray == null ? null : parentArray.getMetadata(key) : value;
   }
 }

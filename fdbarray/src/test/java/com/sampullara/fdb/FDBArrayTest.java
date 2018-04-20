@@ -1,24 +1,19 @@
 package com.sampullara.fdb;
 
-import com.foundationdb.Database;
-import com.foundationdb.FDB;
+import com.apple.foundationdb.Database;
+import com.apple.foundationdb.FDB;
 import jdk.nashorn.internal.ir.annotations.Ignore;
 import org.HdrHistogram.Histogram;
-import org.junit.After;
-import org.junit.AfterClass;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.junit.*;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Semaphore;
 
-import static org.junit.Assert.assertArrayEquals;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.*;
 
 public class FDBArrayTest {
 
@@ -26,7 +21,7 @@ public class FDBArrayTest {
 
   @BeforeClass
   public static void setup() {
-    FDB fdb = FDB.selectAPIVersion(200);
+    FDB fdb = FDB.selectAPIVersion(510);
     Database db = fdb.open();
     FDBArray.create(db, "testArray", 512);
     fdbArray = FDBArray.open(db, "testArray");
@@ -44,7 +39,7 @@ public class FDBArrayTest {
   }
 
   @Test
-  public void testSimpleReadWrite() {
+  public void testSimpleReadWrite() throws ExecutionException, InterruptedException {
     byte[] bytes = new byte[12345];
     Arrays.fill(bytes, (byte) 1);
     fdbArray.write(bytes, 10000).get();
@@ -55,7 +50,7 @@ public class FDBArrayTest {
   }
 
   @Test
-  public void testReadOnly() {
+  public void testReadOnly() throws ExecutionException, InterruptedException {
     byte[] bytes = new byte[12345];
     Arrays.fill(bytes, (byte) 1);
     fdbArray.write(bytes, 10000).get();
@@ -74,7 +69,7 @@ public class FDBArrayTest {
   }
 
   @Test
-  public void testSnapshots() throws InterruptedException {
+  public void testSnapshots() throws InterruptedException, ExecutionException {
     Random r = new Random(1337);
     byte[] bytes = new byte[12345];
     r.nextBytes(bytes);
@@ -99,7 +94,7 @@ public class FDBArrayTest {
   }
 
   @Test
-  public void testParent() {
+  public void testParent() throws ExecutionException, InterruptedException {
     Random r = new Random(1337);
     byte[] parentBytes = new byte[2000];
     r.nextBytes(parentBytes);
@@ -137,7 +132,7 @@ public class FDBArrayTest {
   }
 
   @Test
-  public void testRandomReadWrite() {
+  public void testRandomReadWrite() throws ExecutionException, InterruptedException {
     Random r = new Random(1337);
     for (int i = 0; i < 1000; i++) {
       int length = r.nextInt(10000);
@@ -154,7 +149,7 @@ public class FDBArrayTest {
 
   @Test
   @Ignore
-  public void testRandomReadWriteBenchmark() {
+  public void testRandomReadWriteBenchmark() throws ExecutionException, InterruptedException {
     List<FDBArray> arrays = new ArrayList<>();
     FDBArray fdbArray = FDBArrayTest.fdbArray;
     try {
@@ -172,7 +167,7 @@ public class FDBArrayTest {
             int offset = r.nextInt(100000000);
             semaphore.acquireUninterruptibly();
             long startWrite = System.nanoTime();
-            fdbArray.write(bytes, offset).onReady(() -> {
+            fdbArray.write(bytes, offset).thenRun(() -> {
               semaphore.release();
               long writeLatency = System.nanoTime() - startWrite;
               writeLatencies.recordValue(writeLatency);
@@ -184,7 +179,7 @@ public class FDBArrayTest {
             byte[] read = new byte[length];
             semaphore.acquireUninterruptibly();
             long startRead = System.nanoTime();
-            fdbArray.read(read, offset).onReady(() -> {
+            fdbArray.read(read, offset).thenRun(() -> {
               semaphore.release();
               long readLatency = System.nanoTime() - startRead;
               readLatencies.recordValue(readLatency);
@@ -199,7 +194,11 @@ public class FDBArrayTest {
       }
     } finally {
       arrays.forEach((array) -> {
-        System.out.println("Usage: " + array.usage().get());
+        try {
+          System.out.println("Usage: " + array.usage().get());
+        } catch (ExecutionException | InterruptedException e) {
+          e.printStackTrace();
+        }
         array.delete();
       });
       System.out.println("Usage: " + FDBArrayTest.fdbArray.usage().get());

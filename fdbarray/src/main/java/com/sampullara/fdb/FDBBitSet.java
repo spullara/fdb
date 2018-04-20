@@ -1,16 +1,10 @@
 package com.sampullara.fdb;
 
-import com.foundationdb.Database;
-import com.foundationdb.KeyValue;
-import com.foundationdb.MutationType;
-import com.foundationdb.Range;
-import com.foundationdb.Transaction;
-import com.foundationdb.async.Function;
-import com.foundationdb.async.Future;
-import com.foundationdb.async.ReadyFuture;
-import com.foundationdb.subspace.Subspace;
+import com.apple.foundationdb.*;
+import com.apple.foundationdb.subspace.Subspace;
 
 import java.util.BitSet;
+import java.util.concurrent.CompletableFuture;
 
 public class FDBBitSet {
   private final Database database;
@@ -31,13 +25,10 @@ public class FDBBitSet {
     subspaceRange = Range.startsWith(subspace.pack());
   }
 
-  public Future<Void> set(long startBit, long endBit) {
-    return database.runAsync(new Function<Transaction, Future<Void>>() {
-      @Override
-      public Future<Void> apply(Transaction tx) {
-        FDBBitSet.this.set(tx, startBit, endBit);
-        return ReadyFuture.DONE;
-      }
+  public CompletableFuture<Void> set(long startBit, long endBit) {
+    return database.runAsync(tx -> {
+      FDBBitSet.this.set(tx, startBit, endBit);
+      return CompletableFuture.completedFuture(null);
     });
   }
 
@@ -68,16 +59,24 @@ public class FDBBitSet {
     }
   }
 
-  public Future<Long> count() {
-    return database.runAsync(new Function<Transaction, Future<Long>>() {
-      @Override
-      public Future<Long> apply(Transaction tx) {
-        long count = 0;
-        for (KeyValue keyValue : tx.getRange(subspaceRange)) {
-          count += BitSet.valueOf(keyValue.getValue()).cardinality();
-        }
-        return new ReadyFuture<>(count);
+  public CompletableFuture<Long> count() {
+    return database.runAsync(tx -> {
+      long count = 0;
+      for (KeyValue keyValue : tx.getRange(subspaceRange)) {
+        count += BitSet.valueOf(keyValue.getValue()).cardinality();
       }
+      return CompletableFuture.completedFuture(count);
     });
+  }
+
+  public void clear() {
+    database.run(tx -> {
+      tx.clear(subspaceRange);
+      return null;
+    });
+  }
+
+  public void clear(Transaction tx) {
+    tx.clear(subspaceRange);
   }
 }
